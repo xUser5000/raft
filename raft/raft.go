@@ -266,6 +266,7 @@ func (rf *Raft) electionTimer() {
 	}
 }
 
+// Assumes the lock is already held
 func (rf *Raft) runElection() {
 	rf.serverState = Candidate
 	rf.currentTerm++
@@ -276,7 +277,7 @@ func (rf *Raft) runElection() {
 	DPrintf("(server %v, term %v): became a candidate", rf.me, rf.currentTerm)
 
 	// send RequestVote() RPCs in parallel to all peers
-	voteCount := 1
+	grantedVotes := 1
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -306,8 +307,8 @@ func (rf *Raft) runElection() {
 				}
 
 				if reply.VoteGranted {
-					voteCount++
-					if voteCount > len(rf.peers)/2 {
+					grantedVotes++
+					if grantedVotes > len(rf.peers)/2 && rf.serverState != Leader {
 						// I won the election, I'm the leader now
 						DPrintf("(server %v, term %v): became the leader", rf.me, rf.currentTerm)
 						rf.serverState = Leader
@@ -350,12 +351,13 @@ func (rf *Raft) sendHeartBeats() {
 				sent := rf.sendAppendEntries(server, &args, &reply)
 
 				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
 				if sent && reply.Term > rf.currentTerm {
 					rf.serverState = Follower
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
 				}
-				rf.mu.Unlock()
 
 			}(i, args, reply)
 		}
@@ -428,7 +430,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = []LogEntry{}
 
 	rf.serverState = Follower
-	rf.lastBeat = time.Unix(0, 0) // beginning of time
+	rf.lastBeat = time.Now()
+	rf.electionTimeout = randomDuration(MinElectionTimeout, MaxElectionTimeout)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
