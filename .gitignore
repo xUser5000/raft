@@ -1,0 +1,9 @@
+.idea
+.code
+mr-tmp
+*.so
+mr-out-*
+mr-*-*
+mrmaster
+mrsequential
+mrworker
