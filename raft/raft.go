@@ -536,7 +536,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, entry)
 
 	// attempt to replicate it on followers
-	go rf.replicateEntries()
+	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.replicateEntries()
+	}()
 
 	return entry.Index, rf.currentTerm, isLeader
 }
