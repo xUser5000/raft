@@ -20,6 +20,7 @@ package raft
 import (
 	"fmt"
 	"raft/labrpc"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -118,8 +119,13 @@ func (args *AppendEntriesArgs) String() string {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term    int  // current term, for the leader to update itself
+	Success bool // true if follower container entry matching prevLogIndex and prevLogTerm
+
+	// for the leader to back up quickly over incorrect follower logs
+	XTerm  int // term in the conflicting entry (if any)
+	XIndex int // index of first entry with xTerm (if any)
+	XLen   int // follower's log length
 }
 
 // GetState return currentTerm and whether this server
@@ -291,6 +297,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
+
+		// send info so that the leader can back up quickly over incorrect logs
+		if args.PrevLogIndex < len(rf.log) {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			reply.XIndex = slices.IndexFunc(rf.log, func(entry LogEntry) bool {
+				return entry.Term == reply.XTerm
+			})
+		} else {
+			reply.XTerm = -1
+			reply.XIndex = -1
+		}
+		reply.XLen = len(rf.log)
 		return
 	}
 
@@ -496,11 +514,27 @@ func (rf *Raft) replicateEntries() {
 					rf.applyCommittedEntries()
 				}
 
-				return
-			}
+			} else {
+				// back up quickly over incorrect follower logs
+				hasXTerm := slices.ContainsFunc(rf.log, func(entry LogEntry) bool {
+					return entry.Term == reply.XTerm
+				})
 
-			if rf.nextIndex[server] > 1 {
-				rf.nextIndex[server]--
+				if reply.XTerm != -1 {
+					if !hasXTerm {
+						rf.nextIndex[server] = reply.XIndex
+					} else {
+						var idx int
+						for idx = len(rf.log) - 1; idx > 0; idx-- {
+							if rf.log[idx].Term == reply.XTerm {
+								break
+							}
+						}
+						rf.nextIndex[server] = idx
+					}
+				} else {
+					rf.nextIndex[server] = reply.XLen
+				}
 			}
 
 		}(i, rf.nextIndex[i], rf.matchIndex[i], args, reply)
