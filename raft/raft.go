@@ -67,7 +67,8 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
-	applyCh   chan ApplyMsg
+	applyCh   chan ApplyMsg       // used to send committed log entries to the application
+	majority  int
 
 	// persistent state on all servers
 	currentTerm int        // latest term server has seen (initialized to 0 on first boot, increases monotonically)
@@ -271,9 +272,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 	DPrintf("(server %v, term %v): sending RequestVote() to %v that contains the following: %v", rf.me, rf.currentTerm, server, args)
-
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	rf.mu.Lock()
@@ -335,7 +334,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("(server %v, term %v): sending AppendEntries() to server %v that contains %v", rf.me, rf.currentTerm, server, args)
-
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
@@ -394,28 +392,31 @@ func (rf *Raft) runElection() {
 			if rf.serverState != Candidate || args.Term != rf.currentTerm {
 				return
 			}
-			if sent {
-				if reply.Term > rf.currentTerm {
-					rf.serverState = Follower
-					rf.currentTerm = reply.Term
-					rf.votedFor = -1
-					return
+			if !sent {
+				return
+			}
+
+			if reply.Term > rf.currentTerm {
+				rf.serverState = Follower
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+				return
+			}
+
+			if reply.VoteGranted {
+				grantedVotes++
+			}
+
+			if grantedVotes >= rf.majority && rf.serverState == Candidate {
+				// I won the election, I'm the leader now
+				DPrintf("(server %v, term %v): became the leader", rf.me, rf.currentTerm)
+				rf.serverState = Leader
+				rf.votedFor = -1
+				for i := range rf.nextIndex {
+					rf.nextIndex[i] = len(rf.log)
+					rf.matchIndex[i] = 0
 				}
-				if reply.VoteGranted {
-					grantedVotes++
-					if grantedVotes > len(rf.peers)/2 && rf.serverState == Candidate {
-						// I won the election, I'm the leader now
-						DPrintf("(server %v, term %v): became the leader", rf.me, rf.currentTerm)
-						rf.serverState = Leader
-						rf.votedFor = -1
-						for i := range rf.nextIndex {
-							rf.nextIndex[i] = len(rf.log)
-							rf.matchIndex[i] = 0
-						}
-						rf.replicateEntries()
-						return
-					}
-				}
+				rf.replicateEntries()
 			}
 		}(i, args, reply)
 	}
@@ -500,7 +501,7 @@ func (rf *Raft) replicateEntries() {
 						}
 					}
 
-					if replicationCount > len(rf.peers)/2 {
+					if replicationCount >= rf.majority {
 						found = true
 						break
 					}
@@ -614,6 +615,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
+	rf.majority = len(peers)/2 + 1
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
