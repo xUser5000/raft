@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"bytes"
 	"fmt"
+	"raft/labgob"
 	"raft/labrpc"
 	"slices"
 	"sync"
@@ -149,6 +151,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	buff := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buff)
+	_ = enc.Encode(rf.currentTerm)
+	_ = enc.Encode(rf.votedFor)
+	_ = enc.Encode(rf.log)
+	data := buff.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -169,6 +178,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		_ = fmt.Errorf("rf.readPersist(): something went wrong while decoding data")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 func (rf *Raft) applyCommittedEntries() {
@@ -210,6 +232,8 @@ func (rf *Raft) isCandidateLogUpToDate(lastLogIndex int, lastLogTerm int) bool {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
+
 	DPrintf("(server %v, term %v): recevied RequestVote() from (server %v, term %v) that contains the following %v", rf.me, rf.currentTerm, args.CandidateId, args.Term, args)
 
 	rf.applyCommittedEntries()
@@ -273,6 +297,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("(server %v, term %v): sending RequestVote() to %v that contains the following: %v", rf.me, rf.currentTerm, server, args)
+	rf.persist()
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	rf.mu.Lock()
@@ -283,6 +308,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	DPrintf("(server %v, term %v): recevied AppendEntries() from (server %v, term %v) that contains %v", rf.me, rf.currentTerm, args.LeaderId, args.Term, args)
 
 	rf.matchTerm(args.Term)
@@ -333,7 +359,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	DPrintf("(server %v, term %v): sending AppendEntries() to server %v that contains %v", rf.me, rf.currentTerm, server, args)
+	rf.persist()
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
